@@ -1,0 +1,58 @@
+[package]
+name = "antenna_r"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "High-performance antenna gain patterns: parabolic and ITU-R envelopes, GRD grids, steerable antennas and phased arrays."
+license = "MIT"
+repository = "https://github.com/Pierre-Penven/antenna-r"
+readme = "README.md"
+exclude = [".github/", "scripts/", "docs/", "Makefile", "CLAUDE.md", "rustfmt.toml"]
+keywords = ["antenna", "phased-array", "satellite", "rf", "radiation-pattern"]
+categories = ["science", "mathematics", "aerospace"]
+
+[dependencies]
+# Sibling crates are not on crates.io yet: pinned git revisions (ADR 0001).
+geometry_r = { git = "https://github.com/Pierre-Penven/geometry-r", rev = "051bb47c08748dee98e66fb543e7aae96fa5238b" }
+rayon = { version = "1.10", optional = true }
+rf-r = { git = "https://github.com/Pierre-Penven/rf-r", rev = "d289d8cf2a080967df4fba48e45462625b86af94" }
+thiserror = "2"
+
+[features]
+default = []
+# Batch evaluation on all cores via rayon.
+parallel = ["dep:rayon"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "antenna_bench"
+harness = false
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+# Grid and element indices are converted to f64 coordinates everywhere; the
+# values stay far below 2^52, so these casts are exact.
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+# Formulas use the textbook notation (u, v, w, k, x, y; dx/dy, tilt_x/tilt_y).
+many_single_char_names = "allow"
+similar_names = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1
