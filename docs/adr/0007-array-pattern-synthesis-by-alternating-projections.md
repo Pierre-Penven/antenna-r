@@ -24,12 +24,16 @@ non-convex.
 
 ## Decision
 
-Option 3, matrix-free (fields and adjoints computed on the fly, rows in parallel), with one
-least-squares gradient step per iteration (`μ = 1 / λ_max(AᴴA)`, power iteration) and the best
-iterate kept. Bounds can be relative to a coverage level, fixed or maximised: shaping at the
-level fitted to the coverage samples (aimed at their median), then fixed-level runs that lower
-the level until the bounds are met and raise it while they still are. Closed-form nulls
-(linearly constrained minimum change) are a separate function.
+Option 3, matrix-free (fields and adjoints computed on the fly, rows in parallel), with a
+least-squares back-projection of four conjugate-gradient steps (CGLS) per iteration — a single
+gradient step converged far too slowly once element patterns make the problem ill-conditioned —
+and the best iterate kept. Bounds can be relative to a coverage level, fixed or maximised:
+shaping at the level fitted to the coverage samples (aimed at their median, so dips are
+lifted), then fixed-level runs judged at the level they reach: at and up to 8 dB below the
+shaped level when it misses the bounds, then upward (1 dB steps, bisection to 0.1 dB) while they
+are met. Closed-form nulls (linearly constrained minimum change) are a separate function.
+Callers should start from a beam pointed into the coverage: a start far outside it converges to
+a poor local optimum.
 
 ## Consequences
 

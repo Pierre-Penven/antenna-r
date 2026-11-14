@@ -414,3 +414,90 @@ fn a_planar_array_covers_a_disc_and_protects_a_region() {
     assert!(level > 8.0 && level < 21.6, "{level}");
     check_gains(&a, &s, &bounds);
 }
+
+#[test]
+fn shaping_that_misses_is_retried_at_fixed_levels() {
+    // Cosine elements, a covered disc and a protected region 25 dB below:
+    // the shaping phase misses, a fixed-level run below it meets the bounds.
+    let d = lambda() / 2.0;
+    let a = PhasedArray::new(
+        CosineQ::new(1.2).unwrap(),
+        &lattice::rectangular(12, 12, d, d).unwrap(),
+        F,
+    )
+    .unwrap();
+    let mut bounds = Vec::new();
+    for i in -25..=25 {
+        for j in -25..=25 {
+            let (u, v) = (f64::from(i) * 0.05, f64::from(j) * 0.05);
+            let Ok(dir) = Direction::from_uv(u, v) else { continue };
+            if u.hypot(v) <= 0.2 {
+                bounds.push(PatternBound {
+                    direction: dir,
+                    min: Some(Level::Coverage(0.0)),
+                    max: None,
+                });
+            } else if (u - 0.6).hypot(v) <= 0.15 {
+                bounds.push(PatternBound {
+                    direction: dir,
+                    min: None,
+                    max: Some(Level::Coverage(-25.0)),
+                });
+            }
+        }
+    }
+    let s = synthesize(
+        &a,
+        &bounds,
+        &SynthesisOptions {
+            iterations: 300,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(s.feasible, "{}", s.max_violation_db);
+    check_gains(&a, &s, &bounds);
+}
+
+#[test]
+fn hopeless_bounds_with_a_tiny_budget_end_in_the_shaping_phase() {
+    let a = ula(8);
+    let bounds = vec![PatternBound {
+        direction: Direction::BORESIGHT,
+        min: Some(Level::Coverage(0.0)),
+        max: Some(Level::Coverage(-10.0)),
+    }];
+    for iterations in [3, 12] {
+        let s = synthesize(
+            &a,
+            &bounds,
+            &SynthesisOptions {
+                iterations,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!s.feasible);
+    }
+}
+
+#[test]
+fn a_zero_field_at_a_coverage_sample_is_lifted() {
+    // Two elements in antiphase: a null on boresight, where gain is required.
+    let a = ula(2).with_excitation(&[1.0, 1.0], &[0.0, PI]).unwrap();
+    let bounds = vec![PatternBound {
+        direction: Direction::BORESIGHT,
+        min: Some(Level::Dbi(0.0)),
+        max: None,
+    }];
+    let s = synthesize(
+        &a,
+        &bounds,
+        &SynthesisOptions {
+            iterations: 20,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(s.feasible, "{}", s.max_violation_db);
+}

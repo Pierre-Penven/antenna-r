@@ -11,8 +11,8 @@
 //! (the normalisation of [`PhasedArray`], ADR 0004). Each iteration:
 //! 1. projects the field onto the bounds: `|F_m|` is clamped to
 //!    `[√(G_min P), √(G_max P)]`, phase kept;
-//! 2. moves the excitation towards that field with one least-squares
-//!    gradient step `w ← w + μ Aᴴ(F' − A w)`, `μ = 1 / λ_max(AᴴA)`;
+//! 2. moves the excitation towards that field: a few conjugate-gradient
+//!    steps (CGLS) on `min ‖A w − F'‖²` from the current excitation;
 //! 3. projects the excitation onto the hardware: failed elements off,
 //!    [`ExcitationLimits`], phase quantisation of the total phase.
 //!
@@ -22,11 +22,12 @@
 //! ([`CoverageLevel::Maximise`]): the level is then refitted at every
 //! iteration while the shape converges (half the budget: aimed at the
 //! median coverage gain, so dips are lifted), then raised in fixed-level runs
-//! (1 dB steps, then bisection) as long as the bounds can still be met —
-//! first lowered until they are met if the shaping phase did not meet them.
+//! (1 dB steps, then bisection) as long as the bounds can still be met; if
+//! the shaping phase does not meet them, fixed levels at and a few steps
+//! below its own are tried first.
 //!
 //! Design is done at the design frequency, without the array's random
-//! errors. Cost per iteration: `2 · samples · elements` complex
+//! errors. Cost per iteration: about `10 · samples · elements` complex
 //! exponentials (rows in parallel with the `parallel` feature).
 
 use crate::array::PhasedArray;
@@ -108,12 +109,14 @@ pub struct Synthesis {
     pub history_db: Vec<f64>,
 }
 
+/// Fixed levels tried below the shaped one when it does not meet the bounds (dB).
+const DOWN_STEPS_DB: [f64; 5] = [0.0, 1.0, 2.0, 4.0, 8.0];
 /// First step when raising the coverage level (dB).
 const LEVEL_STEP_DB: f64 = 1.0;
 /// The coverage level is raised until it is known within this (dB).
 const LEVEL_RESOLUTION_DB: f64 = 0.1;
-/// Power-iteration steps for the gradient step size.
-const POWER_ITERATIONS: usize = 20;
+/// Conjugate-gradient steps of the least-squares back-projection per iteration.
+const CG_STEPS: usize = 4;
 /// Smallest linear gain used for violations of a zero field.
 const MIN_GAIN_LIN: f64 = 1e-30;
 
@@ -316,26 +319,7 @@ impl Problem {
         })
     }
 
-    /// `1 / λ_max(AᴴA)` by power iteration from uniform weights.
-    fn step_size(&self) -> f64 {
-        let mut x: Vec<Complex> = self
-            .geo
-            .on
-            .iter()
-            .map(|&on| if on { Complex::new(1.0, 0.0) } else { Complex::ZERO })
-            .collect();
-        let mut lambda = MIN_GAIN_LIN;
-        for _ in 0..POWER_ITERATIONS {
-            let y = self.adjoint(&self.field(&x));
-            let ny = norm(&y).max(MIN_GAIN_LIN);
-            lambda = ny / norm(&x).max(MIN_GAIN_LIN);
-            x = y.iter().map(|v| v.scale(1.0 / ny)).collect();
-        }
-        1.0 / lambda
-    }
-
     fn solve(&self, bounds: &[PatternBound], start: &[Complex], options: &SynthesisOptions) -> Synthesis {
-        let mu = self.step_size();
         let relative = bounds
             .iter()
             .any(|b| matches!(b.min, Some(Level::Coverage(_))) || matches!(b.max, Some(Level::Coverage(_))));
@@ -346,7 +330,7 @@ impl Problem {
             // Only relative upper bounds: the start's maximum gain is the level.
             (CoverageLevel::Maximise, true) => Mode::Fixed(Some(self.max_gain(start))),
         };
-        let ctx = Run { bounds, mu, options };
+        let ctx = Run { bounds, options };
         let mut history = Vec::with_capacity(options.iterations);
         let start = self.project(start, options);
         let best = match mode {
@@ -374,55 +358,65 @@ impl Problem {
         }
     }
 
-    /// Fixed-level runs after the shaping phase, each warm-started from the
-    /// last feasible design (or the best one so far): below the shaped level
-    /// (1, 2, 4… dB) until the bounds are met, then above it (1 dB steps,
-    /// then bisection to 0.1 dB). Designs are judged at the level they reach
-    /// (their weakest coverage sample).
+    /// Raises the coverage level after the shaping phase: fixed-level runs
+    /// (1 dB steps, then bisection to 0.1 dB), each warm-started from the
+    /// last feasible design and judged at the level it reaches (its weakest
+    /// coverage sample). A shaping result that does not meet the bounds is
+    /// first retried at fixed levels at and up to 8 dB below its own; if none
+    /// meets them, it is shaped further with the remaining budget.
     fn raise(&self, ctx: &Run<'_>, first: Iterate, budget: usize, history: &mut Vec<f64>) -> Iterate {
         let (bounds, options) = (ctx.bounds, ctx.options);
-        let feasible = |it: &Iterate| it.violation <= options.tolerance_db;
-        let chunk = (budget / 8).max(1);
-        let base = first.level.unwrap_or(0.0);
-        let mut lo: Option<Iterate> = None;
-        let mut hi: Option<f64> = None;
-        let mut down = LEVEL_STEP_DB;
-        let mut best = first;
-        if feasible(&best) {
-            lo = Some(best.clone());
-        }
+        let chunk = (budget / 10).max(1);
         let mut used = 0;
-        while used < budget {
-            let trial = match (&lo, hi) {
-                (Some(l), None) => l.level.unwrap_or(0.0) + LEVEL_STEP_DB,
-                (Some(l), Some(h)) => f64::midpoint(l.level.unwrap_or(0.0), h),
-                (None, _) => base - down,
-            };
-            let n = chunk.min(budget - used);
-            used += n;
-            let from = lo.as_ref().map_or_else(|| best.w.clone(), |l| l.w.clone());
-            let mut r = self.iterate(ctx, from, Mode::Fixed(Some(trial)), n, history);
+        // Judge a fixed-level run at the level it reached.
+        let run = |w: Vec<Complex>, trial: f64, n: usize, history: &mut Vec<f64>| {
+            let mut r = self.iterate(ctx, w, Mode::Fixed(Some(trial)), n, history);
             let reached = level_bracket(bounds, &r.gains).1;
             r.violation = violation_at(bounds, &r.gains, Some(reached));
             r.level = Some(reached);
-            if r.violation < best.violation {
-                best = r.clone();
+            r
+        };
+        let mut lo = first;
+        if lo.violation > options.tolerance_db {
+            // Fixed-level runs at and below the shaped level, a few steps
+            // only; failing that, more shaping.
+            let base = lo.level.unwrap_or(0.0);
+            // Each step takes one chunk; at most `budget / chunk` of them fit.
+            let steps = budget / chunk;
+            let found = DOWN_STEPS_DB.iter().take(steps).find_map(|down| {
+                used += chunk;
+                let r = run(lo.w.clone(), base - down, chunk, history);
+                (r.violation <= options.tolerance_db).then_some(r)
+            });
+            let rest = budget - used;
+            lo = found.unwrap_or_else(|| {
+                better(
+                    self.iterate(ctx, lo.w.clone(), Mode::Adaptive, rest, history),
+                    lo,
+                    options.tolerance_db,
+                )
+            });
+        }
+        if lo.violation > options.tolerance_db {
+            return lo;
+        }
+        let mut hi: Option<f64> = None;
+        while used < budget {
+            let l = lo.level.unwrap_or(0.0);
+            let trial = hi.map_or(l + LEVEL_STEP_DB, |h| f64::midpoint(l, h));
+            let n = chunk.min(budget - used);
+            used += n;
+            let r = run(lo.w.clone(), trial, n, history);
+            if r.violation <= options.tolerance_db && r.level.unwrap_or(f64::NEG_INFINITY) > l {
+                lo = r;
+            } else {
+                hi = Some(trial);
             }
-            match &lo {
-                Some(l) if feasible(&r) && reached > l.level.unwrap_or(f64::NEG_INFINITY) => lo = Some(r),
-                Some(_) => hi = Some(trial),
-                None if feasible(&r) => lo = Some(r),
-                None => down *= 2.0,
-            }
-            let narrow = match (&lo, hi) {
-                (Some(l), Some(h)) => h - l.level.unwrap_or(0.0) < LEVEL_RESOLUTION_DB,
-                _ => false,
-            };
-            if narrow {
+            if hi.is_some_and(|h| h - lo.level.unwrap_or(0.0) < LEVEL_RESOLUTION_DB) {
                 break;
             }
         }
-        lo.unwrap_or(best)
+        lo
     }
 
     /// Highest gain (dBi) over the samples.
@@ -493,7 +487,7 @@ impl Problem {
     /// One projection step: field clamped to the bounds, gradient step,
     /// hardware projection.
     fn step(&self, ctx: &Run<'_>, e: &Evaluated) -> Vec<Complex> {
-        let (bounds, mu, options) = (ctx.bounds, ctx.mu, ctx.options);
+        let (bounds, options) = (ctx.bounds, ctx.options);
         // Lower bounds aim at the target, upper bounds at the judged level.
         let (c_lo, c_hi) = (e.target.unwrap_or(0.0), e.it.level.unwrap_or(0.0));
         let p = e.power;
@@ -512,18 +506,43 @@ impl Problem {
                 } else {
                     return Complex::ZERO;
                 };
-                let a = fm.abs();
-                let unit = if a > 0.0 {
-                    fm.scale(1.0 / a)
-                } else {
-                    Complex::new(1.0, 0.0)
-                };
-                unit.scale(t) - *fm
+                // Same phase, magnitude t (an exactly zero field gets no correction).
+                fm.scale(t / fm.abs().max(MIN_GAIN_LIN)) - *fm
             })
             .collect();
-        let g = self.adjoint(&r);
-        let next: Vec<Complex> = e.it.w.iter().zip(&g).map(|(wn, gn)| *wn + gn.scale(mu)).collect();
+        let next = self.least_squares(&e.it.w, r);
         self.project(&next, options)
+    }
+
+    /// `CG_STEPS` conjugate-gradient steps on `min ‖A w − (A w₀ + r)‖²`
+    /// from `w₀` (CGLS; `r` is the residual of the projected field).
+    fn least_squares(&self, w0: &[Complex], mut r: Vec<Complex>) -> Vec<Complex> {
+        let mut w = w0.to_vec();
+        let mut s = self.adjoint(&r);
+        let mut p = s.clone();
+        let mut gamma = norm_sqr(&s);
+        for _ in 0..CG_STEPS {
+            let q = self.field(&p);
+            let qq = norm_sqr(&q);
+            if gamma <= MIN_GAIN_LIN || qq <= MIN_GAIN_LIN {
+                break;
+            }
+            let alpha = gamma / qq;
+            for (wn, pn) in w.iter_mut().zip(&p) {
+                *wn += pn.scale(alpha);
+            }
+            for (rm, qm) in r.iter_mut().zip(&q) {
+                *rm -= qm.scale(alpha);
+            }
+            s = self.adjoint(&r);
+            let next = norm_sqr(&s);
+            let beta = next / gamma;
+            for (pn, sn) in p.iter_mut().zip(&s) {
+                *pn = *sn + pn.scale(beta);
+            }
+            gamma = next;
+        }
+        w
     }
 
     /// Hardware projection: failed elements off, amplitude limits, total-phase quantisation.
@@ -561,11 +580,14 @@ enum Mode {
     Adaptive,
 }
 
+/// The better of two iterates.
+fn better(a: Iterate, b: Iterate, tolerance_db: f64) -> Iterate {
+    if a.better_than(&b, tolerance_db) { a } else { b }
+}
+
 /// Settings of one synthesis run.
 struct Run<'a> {
     bounds: &'a [PatternBound],
-    /// Gradient step size.
-    mu: f64,
     options: &'a SynthesisOptions,
 }
 
@@ -760,8 +782,8 @@ fn reciprocal(z: Complex) -> Complex {
     z.conj().scale(1.0 / z.norm_sqr())
 }
 
-fn norm(v: &[Complex]) -> f64 {
-    v.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt()
+fn norm_sqr(v: &[Complex]) -> f64 {
+    v.iter().map(|c| c.norm_sqr()).sum::<f64>()
 }
 
 /// `Σ |w_n|²` over radiating elements (never 0).
