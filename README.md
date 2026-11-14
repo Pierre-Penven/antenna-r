@@ -13,7 +13,9 @@ this direction" without caring which antenna it is:
 - **Steerable antennas**: any pattern on an az/el, X-over-Y or free mount, with limits, roll,
   pointing error and electronic scan loss.
 - **Phased arrays**: element pattern × array factor, lattices, Taylor and Dolph–Chebyshev tapers,
-  phase or true-time-delay steering (beam squint), phase quantisation, failures, multi-beam.
+  phase or true-time-delay steering (beam squint), phase quantisation, failures, multi-beam,
+  per-element excitation with beamformer limits, pattern synthesis (contoured beams,
+  not-to-exceed regions) and closed-form nulls.
 
 It builds on [`rf-r`](https://github.com/Pierre-Penven/rf-r) (dB math, aperture gain) and
 [`geometry_r`](https://github.com/Pierre-Penven/geometry-r) (vectors, satellite and ground frames).

@@ -2,7 +2,7 @@
 //! kind, Gauss–Legendre quadrature and small geometric utilities.
 
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
-use std::ops::{Add, AddAssign, Mul};
+use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 
 /// Minimal complex number (`re + j·im`) used for field components and array
 /// factors. Only the operations the crate needs are provided.
@@ -42,6 +42,63 @@ impl Complex {
     #[must_use]
     pub fn arg(self) -> f64 {
         self.im.atan2(self.re)
+    }
+}
+
+impl Complex {
+    /// Zero.
+    pub const ZERO: Self = Self::new(0.0, 0.0);
+
+    /// Complex conjugate `re − j·im`.
+    ///
+    /// ```
+    /// use antenna_r::math::Complex;
+    /// assert_eq!(Complex::new(1.0, 2.0).conj(), Complex::new(1.0, -2.0));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn conj(self) -> Self {
+        Self::new(self.re, -self.im)
+    }
+
+    /// Product with a real number.
+    ///
+    /// ```
+    /// use antenna_r::math::Complex;
+    /// assert_eq!(Complex::new(1.0, -2.0).scale(3.0), Complex::new(3.0, -6.0));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn scale(self, k: f64) -> Self {
+        Self::new(self.re * k, self.im * k)
+    }
+
+    /// Magnitude `|z|`.
+    ///
+    /// ```
+    /// use antenna_r::math::Complex;
+    /// assert_eq!(Complex::new(3.0, 4.0).abs(), 5.0);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn abs(self) -> f64 {
+        self.re.hypot(self.im)
+    }
+}
+
+impl Sub for Complex {
+    type Output = Self;
+    #[inline]
+    fn sub(self, o: Self) -> Self {
+        Self::new(self.re - o.re, self.im - o.im)
+    }
+}
+
+impl SubAssign for Complex {
+    #[inline]
+    fn sub_assign(&mut self, o: Self) {
+        self.re -= o.re;
+        self.im -= o.im;
     }
 }
 
@@ -258,6 +315,16 @@ pub(crate) fn assert_close(actual: f64, expected: f64, tol: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complex_subtraction_conjugate_and_scaling() {
+        let mut z = Complex::new(3.0, 4.0) - Complex::new(1.0, 1.0);
+        assert_eq!(z, Complex::new(2.0, 3.0));
+        z -= Complex::new(2.0, 3.0);
+        assert_eq!(z, Complex::ZERO);
+        assert_eq!(Complex::new(1.0, 2.0).conj().scale(2.0), Complex::new(2.0, -4.0));
+        assert_eq!(Complex::new(-3.0, 4.0).abs(), 5.0);
+    }
 
     #[test]
     fn complex_arithmetic_matches_definitions() {

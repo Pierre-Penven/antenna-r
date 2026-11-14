@@ -19,12 +19,14 @@ decisions in [docs/adr](adr/).
 | `grd::ticra` | `GrdFile`, `GrdSet`, `FieldComponents`, `MAX_GRID_POINTS`, `MAX_SETS` | `grd`, `math` |
 | `grd::table` | `parse_theta_phi_table`, `parse_symmetric_cut` | `grd` |
 | `steer` | `Steered<P>`, `Mount`, `AxisRange`, `SteeringLimits`, `ScanLoss`, `pointing_loss_db` | `geometry_r::math` |
-| `array` | `PhasedArray<E>`, `MultiBeamArray<E>`, `SteeringMode` | `math`, `rf-r` |
+| `array` | `PhasedArray<E>` (incl. `with_excitation`, `power_efficiency`), `MultiBeamArray<E>`, `SteeringMode` | `math`, `rf-r` |
+| `array::excitation` | `ExcitationLimits` (phase-only, attenuator range / bits), `quantise_phase` | — |
+| `array::synthesis` | `synthesize` (alternating projections over `PatternBound`s, fixed or maximised coverage level), `place_nulls` (closed-form minimum-change nulls), `SynthesisOptions`, `Synthesis` | `array::excitation`, `math`, `rayon` (feature `parallel`) |
 | `array::lattice` | `linear`, `rectangular`, `triangular`, `concentric_rings`, `circular_mask`, `polygon_mask` | — |
-| `array::taper` | `uniform`, `cosine_on_pedestal`, `taylor`, `chebyshev`, `separable`, `taper_efficiency` | `math` |
+| `array::taper` | `uniform`, `cosine_on_pedestal`, `taylor`, `chebyshev`, `separable`, `taper_efficiency`, `power_efficiency` | `math` |
 | `array::grating` | `grating_lobes`, `has_grating_lobe` | — |
 | `frames` | `direction_from_satellite`, `gain_from_satellite`, `gains_from_satellite`, `direction_from_station`, `gain_from_station` | `geometry_r` |
-| `analysis` | `cut`, `gain_map_theta_phi`, `gain_map_uv`, `beam_edge_rad`, `beamwidth_rad`, `cut_features`, `mean_gain_db(_piecewise)`, `directivity_dbi` | `math` |
+| `analysis` | `cut`, `gain_map_theta_phi`, `gain_map_uv`, `beam_edge_rad`, `beamwidth_rad`, `cut_features`, `mean_gain_db(_piecewise)`, `directivity_dbi`, `find_peak`, `refine_peak` | `math` |
 | `math` | `Complex`, `bessel_jn`, `lambda_n`, `gauss_legendre`, `ellipse_radius`, `chebyshev_t` | — |
 | `batch` (feature `parallel`) | `par_gain_dbi_batch`, `par_array_gain_dbi_at` | `rayon` |
 | `error` | `AntennaError`, `Result` | `thiserror` |
