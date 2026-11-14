@@ -501,3 +501,78 @@ fn a_zero_field_at_a_coverage_sample_is_lifted() {
     .unwrap();
     assert!(s.feasible, "{}", s.max_violation_db);
 }
+
+#[test]
+fn a_coverage_far_wider_than_the_beam_is_filled() {
+    // A disc of radius 0.25 in uv (about 29° across) with only a lower bound:
+    // the 16 × 16 start is a 6° pencil beam whose weakest coverage sample is
+    // tens of dB down. The level must approach the flat-top value, not stay
+    // at the pencil beam's weakest sample.
+    let d = lambda() / 2.0;
+    let a = PhasedArray::new(
+        Isotropic::new(0.0).unwrap(),
+        &lattice::rectangular(16, 16, d, d).unwrap(),
+        F,
+    )
+    .unwrap();
+    let mut bounds = Vec::new();
+    for i in -25..=25 {
+        for j in -25..=25 {
+            let (u, v) = (f64::from(i) * 0.01 * 2.0, f64::from(j) * 0.01 * 2.0);
+            if u.hypot(v) <= 0.25 {
+                bounds.push(PatternBound {
+                    direction: Direction::from_uv(u, v).unwrap(),
+                    min: Some(Level::Coverage(0.0)),
+                    max: None,
+                });
+            }
+        }
+    }
+    let opts = SynthesisOptions {
+        iterations: 300,
+        ..Default::default()
+    };
+    // From the pencil beam: the power-mean target still lifts the coverage.
+    let pencil = synthesize(&a, &bounds, &opts).unwrap();
+    let from_pencil = pencil.coverage_level_dbi.unwrap();
+    assert!(from_pencil > -10.0, "{from_pencil}");
+    // From the matched start: close to the flat top.
+    let (amps, phases) = coverage_start(&a, &bounds).unwrap();
+    let a = a.with_excitation(&amps, &phases).unwrap();
+    let s = synthesize(&a, &bounds, &opts).unwrap();
+    assert!(s.feasible, "{}", s.max_violation_db);
+    let level = s.coverage_level_dbi.unwrap();
+    // Parseval: the gain integrates to (λ/d)² = 4 over a uv cell, so a flat
+    // top over the disc (area π·0.25²) is at most 10·log10(4 / 0.196) ≈ 13.1 dBi.
+    assert!(level > 10.0 && level < 13.2, "{level}");
+    assert!(level > from_pencil + 3.0, "{level} vs {from_pencil}");
+    // Shaped well beyond the start: more than the first iterate.
+    assert!(s.history_db.len() > 1);
+    check_gains(&a, &s, &bounds);
+}
+
+#[test]
+fn the_coverage_start_needs_a_lower_bound_and_skips_failed_elements() {
+    let a = ula(4);
+    let ceiling = vec![PatternBound {
+        direction: Direction::BORESIGHT,
+        min: None,
+        max: Some(Level::Dbi(0.0)),
+    }];
+    assert!(coverage_start(&a, &ceiling).is_err());
+    assert!(coverage_start(&a, &[]).is_err());
+    let cover = vec![PatternBound {
+        direction: Direction::BORESIGHT,
+        min: Some(Level::Dbi(3.0)),
+        max: None,
+    }];
+    let (amps, phases) = coverage_start(&a, &cover).unwrap();
+    // One sample on boresight: uniform, in phase.
+    for (am, ph) in amps.iter().zip(&phases) {
+        assert_close(*am, 1.0, 1e-9);
+        assert_close(*ph, 0.0, 1e-9);
+    }
+    // Failed elements get no weight.
+    let (amps, _) = coverage_start(&ula(4).with_failed_elements(&[1]).unwrap(), &cover).unwrap();
+    assert_eq!(amps[1], 0.0);
+}

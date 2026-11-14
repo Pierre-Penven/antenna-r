@@ -21,7 +21,9 @@
 //! may be relative to a *coverage level* that is either fixed or maximised
 //! ([`CoverageLevel::Maximise`]): the level is then refitted at every
 //! iteration while the shape converges (half the budget: aimed at the
-//! median coverage gain, so dips are lifted), then raised in fixed-level runs
+//! power mean of the coverage gains, the flat-top level by power
+//! conservation, so dips are lifted even when the start is a pencil beam far
+//! narrower than the coverage), then raised in fixed-level runs
 //! (1 dB steps, then bisection) as long as the bounds can still be met; if
 //! the shaping phase does not meet them, fixed levels at and a few steps
 //! below its own are tried first.
@@ -161,6 +163,64 @@ pub fn synthesize<E: GainPattern>(
         .map(|(a, p)| Complex::from_polar(*a, *p))
         .collect();
     Ok(problem.solve(bounds, &start, options))
+}
+
+/// A start for [`synthesize`] when the array's own excitation is a poor one
+/// (a pencil beam far narrower than the coverage): the least-squares fit of
+/// a field that is flat, in phase, over the samples with a lower bound and
+/// zero over the samples with only an upper bound (a few conjugate-gradient
+/// steps from zero, the first being the back-projection `Aᴴ t` of the
+/// Woodward–Lawson method). A coverage-relative lower bound `o` asks for
+/// `10^(o/20)` of the common field, an absolute one for its linear level.
+/// Steering, failed elements and the element pattern are those of `array`;
+/// the result is relative to its steering phases, like
+/// [`PhasedArray::with_excitation`].
+///
+/// ```
+/// use antenna_r::{Direction, GainPattern, Isotropic};
+/// use antenna_r::array::{PhasedArray, lattice::linear};
+/// use antenna_r::array::synthesis::{coverage_start, Level, PatternBound};
+/// let lambda = rf_r::fspl::wavelength_m(10e9);
+/// let a = PhasedArray::new(Isotropic::new(0.0).unwrap(), &linear(16, lambda / 2.0).unwrap(), 10e9).unwrap();
+/// // Fill ±20° instead of the 6° pencil beam.
+/// let cover: Vec<PatternBound> = (-20..=20)
+///     .map(|t| PatternBound {
+///         direction: Direction::from_theta_phi(f64::from(t).abs().to_radians(), if t < 0 { std::f64::consts::PI } else { 0.0 }),
+///         min: Some(Level::Coverage(0.0)),
+///         max: None,
+///     })
+///     .collect();
+/// let (amps, phases) = coverage_start(&a, &cover).unwrap();
+/// let b = a.with_excitation(&amps, &phases).unwrap();
+/// let edge = b.gain_dbi(Direction::from_theta_phi(18f64.to_radians(), 0.0));
+/// assert!(edge > b.gain_dbi(Direction::BORESIGHT) - 6.0);
+/// ```
+///
+/// # Errors
+/// [`AntennaError::InvalidParameter`] for no lower bound, or non-finite
+/// directions or levels.
+pub fn coverage_start<E: GainPattern>(array: &PhasedArray<E>, bounds: &[PatternBound]) -> Result<(Vec<f64>, Vec<f64>)> {
+    check(bounds, &SynthesisOptions::default())?;
+    let target: Vec<Complex> = bounds
+        .iter()
+        .map(|b| match b.min {
+            Some(Level::Coverage(v) | Level::Dbi(v)) => Complex::new(10f64.powf(v / 20.0), 0.0),
+            None => Complex::ZERO,
+        })
+        .collect();
+    if target.iter().all(|t| *t == Complex::ZERO) {
+        return Err(invalid("bounds", "give at least one lower bound"));
+    }
+    let problem = Problem::new(array, bounds);
+    let w = problem.least_squares(&vec![Complex::ZERO; problem.geo.kpos.len()], target);
+    // A fit cannot vanish unless the element radiates nothing towards every
+    // lower bound; the amplitudes are then all zero.
+    let max = w.iter().map(|c| c.abs()).fold(0.0, f64::max);
+    let scale = if max > 0.0 { 1.0 / max } else { 0.0 };
+    Ok((
+        w.iter().map(|c| c.abs() * scale).collect(),
+        w.iter().map(|c| c.arg()).collect(),
+    ))
 }
 
 /// Closed-form nulls: the excitation closest to the array's current one (in
@@ -440,7 +500,7 @@ impl Problem {
         let mut best = current.it.clone();
         for _ in 0..iterations {
             history.push(current.it.violation);
-            if current.it.violation == 0.0 {
+            if current.settled() {
                 break;
             }
             let next = self.step(ctx, &current);
@@ -461,13 +521,13 @@ impl Problem {
             .map(|fm| 10.0 * (fm.norm_sqr() / power).max(MIN_GAIN_LIN).log10())
             .collect();
         // Level the design is judged at (the weakest coverage sample), and
-        // level it aims for: the median coverage sample, so dips are lifted,
-        // or higher when the ripple is exceeded.
+        // level it aims for: the power mean of the coverage samples (what a
+        // flat top would reach), or higher when the ripple is exceeded.
         let (level, target) = match mode {
             Mode::Fixed(l) => (l, l),
             Mode::Adaptive => {
                 let (lo, hi) = level_bracket(bounds, &gains);
-                (Some(hi), Some(median_coverage(bounds, &gains).max(lo)))
+                (Some(hi), Some(mean_coverage(bounds, &gains).max(lo)))
             }
         };
         let violation = violation_at(bounds, &gains, level);
@@ -599,6 +659,20 @@ struct Evaluated {
     target: Option<f64>,
 }
 
+impl Evaluated {
+    /// Nothing left to do: the bounds are met and, while the level is
+    /// refitted, the weakest coverage sample has reached the target (judged
+    /// at its own weakest sample, a coverage-only design always "meets" its
+    /// bounds, so meeting them alone would stop before any shaping).
+    fn settled(&self) -> bool {
+        self.it.violation == 0.0
+            && match (self.it.level, self.target) {
+                (Some(level), Some(target)) => level >= target - LEVEL_RESOLUTION_DB,
+                _ => true,
+            }
+    }
+}
+
 /// One iterate of the solver.
 #[derive(Clone)]
 struct Iterate {
@@ -620,18 +694,20 @@ impl Iterate {
     }
 }
 
-/// Median of `g − o_min` over the coverage samples (relative lower bounds).
-fn median_coverage(bounds: &[PatternBound], gains: &[f64]) -> f64 {
-    let mut v: Vec<f64> = bounds
+/// Power mean (dB) of `g − o_min` over the coverage samples (relative lower
+/// bounds): `10 log10(mean(10^((g − o) / 10)))`. With samples evenly spread
+/// over the coverage, it is the level a flat top would reach with the power
+/// the current design puts there, whatever the start's beam width.
+fn mean_coverage(bounds: &[PatternBound], gains: &[f64]) -> f64 {
+    let (sum, n) = bounds
         .iter()
         .zip(gains)
         .filter_map(|(b, g)| match b.min {
-            Some(Level::Coverage(o)) => Some(g - o),
+            Some(Level::Coverage(o)) => Some(10f64.powf((g - o) / 10.0)),
             _ => None,
         })
-        .collect();
-    v.sort_by(f64::total_cmp);
-    v[v.len() / 2]
+        .fold((0.0, 0usize), |(s, n), v| (s + v, n + 1));
+    10.0 * (sum / n as f64).log10()
 }
 
 /// Whether some bound is a coverage-relative lower bound.

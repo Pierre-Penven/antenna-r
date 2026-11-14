@@ -21,7 +21,7 @@ decisions in [docs/adr](adr/).
 | `steer` | `Steered<P>`, `Mount`, `AxisRange`, `SteeringLimits`, `ScanLoss`, `pointing_loss_db` | `geometry_r::math` |
 | `array` | `PhasedArray<E>` (incl. `with_excitation`, `power_efficiency`), `MultiBeamArray<E>`, `SteeringMode` | `math`, `rf-r` |
 | `array::excitation` | `ExcitationLimits` (phase-only, attenuator range / bits), `quantise_phase` | — |
-| `array::synthesis` | `synthesize` (alternating projections over `PatternBound`s, fixed or maximised coverage level), `place_nulls` (closed-form minimum-change nulls), `SynthesisOptions`, `Synthesis` | `array::excitation`, `math`, `rayon` (feature `parallel`) |
+| `array::synthesis` | `synthesize` (alternating projections over `PatternBound`s, fixed or maximised coverage level), `place_nulls` (closed-form minimum-change nulls), `coverage_start` (matched start for wide coverages), `SynthesisOptions`, `Synthesis` | `array::excitation`, `math`, `rayon` (feature `parallel`) |
 | `array::lattice` | `linear`, `rectangular`, `triangular`, `concentric_rings`, `circular_mask`, `polygon_mask` | — |
 | `array::taper` | `uniform`, `cosine_on_pedestal`, `taylor`, `chebyshev`, `separable`, `taper_efficiency`, `power_efficiency` | `math` |
 | `array::grating` | `grating_lobes`, `has_grating_lobe` | — |
