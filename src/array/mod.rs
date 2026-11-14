@@ -712,8 +712,8 @@ mod tests {
         let q = b.clone().with_phase_bits(Some(3)).unwrap();
         assert_eq!(q.phase_bits(), Some(3));
         let quantum = TAU / 8.0;
-        for n in 0..4 {
-            let k = q.phase[n] / quantum;
+        for p in &q.phase {
+            let k = p / quantum;
             assert_close(k, k.round(), 1e-9);
         }
         // True time delay: only the offsets are phases.
