@@ -13,10 +13,15 @@ All notable changes to this project are documented here. The format follows
   `quantise_phase`.
 - `array::synthesis`: `synthesize` (lower / upper gain bounds at sampled directions, coverage level
   fixed or maximised, hardware limits, warm start) and `place_nulls` (closed-form nulls).
+- `array::synthesis::coverage_start`: matched start for a coverage far wider than the beam
+  (least-squares fit of a flat, in-phase field over the lower-bounded samples).
 - `analysis::find_peak` and `analysis::refine_peak` (true pattern maximum).
 - `math::Complex`: `ZERO`, `conj`, `scale`, `abs`, subtraction.
 
 ### Changed
+- Synthesis with a maximised coverage level aims at the power mean of the coverage gains (was the
+  median) and keeps shaping until the weakest sample reaches it: a coverage-only goal far wider
+  than the start beam is now filled instead of being returned unchanged as "feasible".
 - `PhasedArray::with_phase_bits` quantises the total phase (steering + excitation offset); with
   zero offsets the result is unchanged.
 
