@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `array::kernel`: `PhasedArray::kernel` and `ArrayKernel` — the shift-invariant gain of a planar
+  array without phase quantisation (natural or shaped beams, phase or true-time-delay steering,
+  squint off the design frequency), tabulated once as two 1D tables (rectangular grid with
+  row × column weights, the separable fast path) or one 2D table; a gain costs a few lookups
+  (≈ 12 ns against ≈ 6 µs for 400 elements).
 - Array excitation: `PhasedArray::with_excitation` (per-element amplitude and phase offset added
   to the steering phase), accessors (`excitation`, `positions`, `failed`, `phase_bits`,
   `steering_phases_rad`, `radiated_amplitudes`), `power_efficiency` (per-element amplifiers).

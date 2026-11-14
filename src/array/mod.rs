@@ -19,6 +19,7 @@
 
 pub mod excitation;
 pub mod grating;
+pub mod kernel;
 pub mod lattice;
 pub mod synthesis;
 pub mod taper;
@@ -74,7 +75,7 @@ pub struct PhasedArray<E> {
 }
 
 /// Wavenumber `2π f / c` (rad/m).
-fn wavenumber(freq_hz: f64) -> f64 {
+pub(crate) fn wavenumber(freq_hz: f64) -> f64 {
     TAU * freq_hz / rf_r::constants::SPEED_OF_LIGHT
 }
 
