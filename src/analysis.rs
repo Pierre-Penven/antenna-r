@@ -3,6 +3,8 @@
 
 use std::f64::consts::{PI, TAU};
 
+use geometry_r::math::Vec3;
+
 use crate::direction::Direction;
 use crate::math::gauss_legendre;
 use crate::pattern::GainPattern;
@@ -94,6 +96,81 @@ pub fn beam_edge_rad(pattern: &dyn GainPattern, phi_rad: f64, level_db: f64) -> 
 #[must_use]
 pub fn beamwidth_rad(pattern: &dyn GainPattern, phi_rad: f64, level_db: f64) -> Option<f64> {
     Some(beam_edge_rad(pattern, phi_rad, level_db)? + beam_edge_rad(pattern, phi_rad + PI, level_db)?)
+}
+
+/// Smallest step of the peak refinement (radians).
+const PEAK_RESOLUTION_RAD: f64 = 1e-9;
+
+/// Highest gain near `start`: compass search on the sphere (steps along two
+/// directions orthogonal to the current one, halved when no step improves)
+/// from `step_rad` down to 1e-9 rad. Returns the direction and its gain.
+/// Finds the local maximum whose basin contains `start`.
+///
+/// ```
+/// use antenna_r::{Direction, analysis::refine_peak, parabolic::GaussianBeam, steer::{Mount, Steered}};
+/// let mut beam = Steered::new(GaussianBeam::new(30.0, 0.05).unwrap(), Mount::Free);
+/// beam.point_at(Direction::from_theta_phi(0.2, 0.3)).unwrap();
+/// let (d, g) = refine_peak(&beam, Direction::from_theta_phi(0.18, 0.35), 0.01);
+/// assert!((d.theta_rad() - 0.2).abs() < 1e-6 && (g - 30.0).abs() < 1e-9);
+/// ```
+#[must_use]
+pub fn refine_peak(pattern: &dyn GainPattern, start: Direction, step_rad: f64) -> (Direction, f64) {
+    let mut best = (start, pattern.gain_dbi(start));
+    let mut step = step_rad.abs().min(PI);
+    while step > PEAK_RESOLUTION_RAD {
+        let v = best.0.vec3();
+        // Two unit vectors orthogonal to v.
+        let a = if v.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+        let e1 = v.cross(a).normalize();
+        let e2 = v.cross(e1);
+        let mut moved = false;
+        for t in [e1, e1 * -1.0, e2, e2 * -1.0] {
+            // A unit vector plus an orthogonal one is never zero.
+            let d = Direction::from_vec3(v * step.cos() + t * step.sin()).unwrap_or(best.0);
+            let g = pattern.gain_dbi(d);
+            if g > best.1 {
+                best = (d, g);
+                moved = true;
+            }
+        }
+        if !moved {
+            step *= 0.5;
+        }
+    }
+    best
+}
+
+/// Highest gain over the sphere: the best point of a θ/φ grid of step
+/// `step_rad`, refined with [`refine_peak`]. The step must be finer than the
+/// narrowest lobe to be sure to find the global maximum. `None` for a
+/// non-positive or non-finite step.
+///
+/// ```
+/// use antenna_r::{Direction, analysis::find_peak, parabolic::GaussianBeam, steer::{Mount, Steered}};
+/// let mut beam = Steered::new(GaussianBeam::new(30.0, 0.1).unwrap(), Mount::Free);
+/// beam.point_at(Direction::from_theta_phi(1.0, 2.0)).unwrap();
+/// let (d, g) = find_peak(&beam, 0.02).unwrap();
+/// assert!((d.theta_rad() - 1.0).abs() < 1e-6 && (g - 30.0).abs() < 1e-9);
+/// ```
+#[must_use]
+pub fn find_peak(pattern: &dyn GainPattern, step_rad: f64) -> Option<(Direction, f64)> {
+    if !(step_rad.is_finite() && step_rad > 0.0) {
+        return None;
+    }
+    let n_theta = (PI / step_rad).ceil() as usize + 1;
+    let n_phi = (TAU / step_rad).ceil() as usize;
+    let mut best = (Direction::BORESIGHT, pattern.gain_dbi(Direction::BORESIGHT));
+    for i in 0..n_theta {
+        let theta = (i as f64 * step_rad).min(PI);
+        for j in 0..n_phi {
+            let d = Direction::from_theta_phi(theta, j as f64 * step_rad);
+            let g = pattern.gain_dbi(d);
+            if g > best.1 {
+                best = (d, g);
+            }
+        }
+    }
+    Some(refine_peak(pattern, best.0, step_rad))
 }
 
 /// Main-lobe and first side-lobe figures of a half-cut.
@@ -221,6 +298,35 @@ mod tests {
     use super::*;
     use crate::math::assert_close;
     use crate::pattern::{CosineQ, Isotropic};
+
+    #[test]
+    fn peak_search_on_the_sphere() {
+        // Lobes peaks at θ = 0; refined from nearby and from the grid.
+        let (d, g) = refine_peak(&Lobes, Direction::from_theta_phi(0.2, 1.0), 0.1);
+        assert!(d.theta_rad() < 1e-6, "{}", d.theta_rad());
+        assert_close(g, 20.0, 1e-6);
+        // Near the X axis the other orthogonal basis is used.
+        let x = Direction::from_theta_phi(std::f64::consts::FRAC_PI_2, 0.0);
+        let (_, gx) = refine_peak(&Isotropic::new(3.0).unwrap(), x, 0.1);
+        assert_close(gx, 3.0, 1e-12);
+        let (d, g) = find_peak(&Lobes, 0.05).unwrap();
+        assert!(d.theta_rad() < 1e-6);
+        assert_close(g, 20.0, 1e-6);
+        assert!(find_peak(&Lobes, 0.0).is_none());
+        assert!(find_peak(&Lobes, f64::NAN).is_none());
+        // A peak away from the grid start (boresight) is found from the grid.
+        let mut beam = crate::steer::Steered::new(
+            crate::parabolic::GaussianBeam::new(30.0, 0.1).unwrap(),
+            crate::steer::Mount::Free,
+        );
+        beam.point_at(Direction::from_theta_phi(1.0, 2.0)).unwrap();
+        let (d, g) = find_peak(&beam, 0.03).unwrap();
+        assert_close(d.theta_rad(), 1.0, 1e-6);
+        assert_close(g, 30.0, 1e-9);
+        // A back-hemisphere peak is found too.
+        let q = CosineQ::new(1.0).unwrap();
+        assert!(find_peak(&q, 0.3).unwrap().0.theta_rad() < 1e-6);
+    }
 
     /// Peaks at θ = 0, null at θ = 0.5, side lobe at θ = 1.0.
     struct Lobes;

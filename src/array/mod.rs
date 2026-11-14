@@ -17,8 +17,10 @@
 //! design frequency, so the beam squints at other frequencies;
 //! [`SteeringMode::TrueTimeDelay`] uses `−k r_n · û0` at every frequency.
 
+pub mod excitation;
 pub mod grating;
 pub mod lattice;
+pub mod synthesis;
 pub mod taper;
 
 use std::f64::consts::TAU;
@@ -56,6 +58,7 @@ pub struct PhasedArray<E> {
     geometry: Arc<Geometry>,
     design_freq_hz: f64,
     taper: Vec<f64>,
+    excitation_phase_rad: Vec<f64>,
     failed: Vec<bool>,
     amp_errors_db: Vec<f64>,
     phase_errors_rad: Vec<f64>,
@@ -108,6 +111,7 @@ impl<E: GainPattern> PhasedArray<E> {
             }),
             design_freq_hz: require_positive("design_freq_hz", design_freq_hz)?,
             taper: vec![1.0; n],
+            excitation_phase_rad: vec![0.0; n],
             failed: vec![false; n],
             amp_errors_db: vec![0.0; n],
             phase_errors_rad: vec![0.0; n],
@@ -169,6 +173,89 @@ impl<E: GainPattern> PhasedArray<E> {
         Ok(self)
     }
 
+    /// Per-element excitation: amplitudes (as [`with_amplitudes`](Self::with_amplitudes))
+    /// and phase offsets added to the steering phase, so a beam shape
+    /// designed at broadside is steered as a whole. With
+    /// [`with_phase_bits`](Self::with_phase_bits) the *total* phase
+    /// (steering + offset) is quantised. Element `n` radiates
+    /// `a_n exp(j(φ_steer,n + φ_n))`.
+    ///
+    /// ```
+    /// use antenna_r::{Direction, GainPattern, Isotropic};
+    /// use antenna_r::array::{PhasedArray, lattice::linear};
+    /// let lambda = rf_r::fspl::wavelength_m(10e9);
+    /// let pos = linear(2, lambda / 2.0).unwrap();
+    /// // Opposite phases: a null on broadside.
+    /// let a = PhasedArray::new(Isotropic::new(0.0).unwrap(), &pos, 10e9)
+    ///     .unwrap()
+    ///     .with_excitation(&[1.0, 1.0], &[0.0, std::f64::consts::PI])
+    ///     .unwrap()
+    ///     .with_floor_dbi(-200.0)
+    ///     .unwrap();
+    /// assert!(a.gain_dbi(Direction::BORESIGHT) < -100.0);
+    /// ```
+    ///
+    /// # Errors
+    /// [`AntennaError::InvalidParameter`] for length mismatches, negative or
+    /// non-finite amplitudes, non-finite phases, or no radiating element.
+    pub fn with_excitation(mut self, amplitudes: &[f64], phases_rad: &[f64]) -> Result<Self> {
+        self.check_len("phases_rad", phases_rad.len())?;
+        if phases_rad.iter().any(|p| !p.is_finite()) {
+            return Err(invalid("phases_rad", "must be finite"));
+        }
+        self.excitation_phase_rad = phases_rad.to_vec();
+        self.with_amplitudes(amplitudes)
+    }
+
+    /// Phase quantisation (bits), if any.
+    #[must_use]
+    pub fn phase_bits(&self) -> Option<u8> {
+        self.phase_bits
+    }
+
+    /// Excitation amplitudes (before failures and errors) and phase offsets (rad).
+    #[must_use]
+    pub fn excitation(&self) -> (&[f64], &[f64]) {
+        (&self.taper, &self.excitation_phase_rad)
+    }
+
+    /// Element positions (m, antenna frame).
+    #[must_use]
+    pub fn positions(&self) -> Vec<Vec3> {
+        let g = &*self.geometry;
+        (0..self.len()).map(|n| Vec3::new(g.x[n], g.y[n], g.z[n])).collect()
+    }
+
+    /// Failed-element flags, one per element.
+    #[must_use]
+    pub fn failed(&self) -> &[bool] {
+        &self.failed
+    }
+
+    /// Ideal steering phase of each element at the design frequency (rad,
+    /// `−k₀ r_n · ŝ`), before offsets and quantisation.
+    #[must_use]
+    pub fn steering_phases_rad(&self) -> Vec<f64> {
+        let k0 = wavenumber(self.design_freq_hz);
+        self.projection.iter().map(|p| -k0 * p).collect()
+    }
+
+    /// Radiated amplitudes actually used (failures and amplitude errors applied).
+    #[must_use]
+    pub fn radiated_amplitudes(&self) -> &[f64] {
+        &self.amplitude
+    }
+
+    /// Power efficiency of one amplifier per element at a fixed peak drive:
+    /// `Σa² / (N · max a²)` (1 for uniform excitation). The EIRP of a
+    /// transmit array is lower than the uniform one by this factor on top of
+    /// the directivity change; a receive array or a passive feed only sees
+    /// the directivity. See [`taper::power_efficiency`].
+    #[must_use]
+    pub fn power_efficiency(&self) -> f64 {
+        taper::power_efficiency(&self.amplitude)
+    }
+
     /// Marks elements as failed (they radiate nothing).
     ///
     /// # Errors
@@ -204,8 +291,10 @@ impl<E: GainPattern> PhasedArray<E> {
         Ok(self)
     }
 
-    /// Quantises the steering phases to `bits` bits (1–16), or removes the
-    /// quantisation with `None`. Applies to [`SteeringMode::Phase`] only.
+    /// Quantises the phase-shifter settings to `bits` bits (1–16), or removes
+    /// the quantisation with `None`. In [`SteeringMode::Phase`] the total
+    /// phase (steering + excitation offset) is quantised; with true time
+    /// delay only the excitation offsets are phases.
     ///
     /// # Errors
     /// [`AntennaError::InvalidParameter`] for `bits` outside 1–16.
@@ -315,16 +404,16 @@ impl<E: GainPattern> PhasedArray<E> {
         self.phase = self
             .projection
             .iter()
+            .zip(&self.excitation_phase_rad)
             .zip(&self.phase_errors_rad)
-            .map(|(p, e)| {
-                let steer = match self.mode {
-                    SteeringMode::Phase => {
-                        let ideal = -k0 * p;
-                        quantum.map_or(ideal, |q| (ideal / q).round() * q)
-                    }
-                    SteeringMode::TrueTimeDelay => 0.0,
+            .map(|((p, x), e)| {
+                // Phase shifters set the total phase (steering + offset);
+                // true time delay steers by delay, the offset stays a phase.
+                let ideal = match self.mode {
+                    SteeringMode::Phase => -k0 * p + x,
+                    SteeringMode::TrueTimeDelay => *x,
                 };
-                steer + e
+                quantum.map_or(ideal, |q| (ideal / q).round() * q) + e
             })
             .collect();
     }
@@ -602,5 +691,47 @@ mod tests {
     fn multi_beam_gains_panic_on_bad_buffer() {
         let mb = MultiBeamArray::new(&ula(2), &[(Direction::BORESIGHT, SteeringMode::Phase)]).unwrap();
         mb.gains_dbi(Direction::BORESIGHT, &mut []);
+    }
+
+    #[test]
+    fn excitation_offsets_add_to_the_steering_and_are_quantised_in_total() {
+        let mut a = ula(4);
+        a.steer(Direction::from_theta_phi(0.3, 0.0), SteeringMode::Phase);
+        let offsets = [0.1, -0.2, 0.3, 0.0];
+        let b = a.clone().with_excitation(&[1.0, 0.5, 1.0, 0.0], &offsets).unwrap();
+        let (amps, phases) = b.excitation();
+        assert_eq!(amps, &[1.0, 0.5, 1.0, 0.0]);
+        assert_eq!(phases, &offsets);
+        let steer = b.steering_phases_rad();
+        for n in 0..4 {
+            assert_close(b.phase[n], steer[n] + offsets[n], 1e-12);
+        }
+        assert_eq!(b.radiated_amplitudes(), &[1.0, 0.5, 1.0, 0.0]);
+        assert_close(b.power_efficiency(), 2.25 / 4.0, 1e-12);
+        // Quantisation applies to the total phase.
+        let q = b.clone().with_phase_bits(Some(3)).unwrap();
+        assert_eq!(q.phase_bits(), Some(3));
+        let quantum = TAU / 8.0;
+        for p in &q.phase {
+            let k = p / quantum;
+            assert_close(k, k.round(), 1e-9);
+        }
+        // True time delay: only the offsets are phases.
+        let mut t = b.clone().with_phase_bits(Some(3)).unwrap();
+        t.steer(Direction::from_theta_phi(0.3, 0.0), SteeringMode::TrueTimeDelay);
+        assert_close(t.phase[0], 0.0, 1e-12);
+        assert_close(t.phase[2], quantum * 0.0 + (0.3f64 / quantum).round() * quantum, 1e-12);
+        assert_eq!(t.positions().len(), 4);
+        assert_close(t.positions()[1].x - t.positions()[0].x, lambda() / 2.0, 1e-12);
+        assert_eq!(t.failed(), &[false; 4]);
+    }
+
+    #[test]
+    fn invalid_excitations_are_rejected() {
+        let a = ula(2);
+        assert!(a.clone().with_excitation(&[1.0, 1.0], &[0.0]).is_err());
+        assert!(a.clone().with_excitation(&[1.0, 1.0], &[0.0, f64::NAN]).is_err());
+        assert!(a.clone().with_excitation(&[1.0], &[0.0, 0.0]).is_err());
+        assert!(a.with_excitation(&[0.0, 0.0], &[0.0, 0.0]).is_err());
     }
 }

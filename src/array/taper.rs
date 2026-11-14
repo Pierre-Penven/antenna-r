@@ -46,6 +46,28 @@ pub fn taper_efficiency(amplitudes: &[f64]) -> f64 {
     }
 }
 
+/// Power efficiency of one amplifier per element driven at most at its peak:
+/// `Σa² / (N · max a²)` in `[0, 1]` (1 for uniform excitation, 0 when no
+/// element radiates). The transmit EIRP of a tapered array is lower than the
+/// uniform one by this factor on top of the directivity change.
+///
+/// ```
+/// use antenna_r::array::taper::power_efficiency;
+/// assert_eq!(power_efficiency(&[1.0, 1.0]), 1.0);
+/// assert_eq!(power_efficiency(&[1.0, 0.0]), 0.5);
+/// assert_eq!(power_efficiency(&[0.0, 0.0]), 0.0);
+/// ```
+#[must_use]
+pub fn power_efficiency(amplitudes: &[f64]) -> f64 {
+    let max = amplitudes.iter().copied().fold(0.0, f64::max);
+    if max > 0.0 {
+        let power: f64 = amplitudes.iter().map(|a| (a / max) * (a / max)).sum();
+        power / amplitudes.len() as f64
+    } else {
+        0.0
+    }
+}
+
 /// Radial cosine-on-pedestal taper over the X-Y plane:
 /// `a = p + (1 − p) cos^e(π r / (2 R))`, `r` clamped to `R`.
 ///
@@ -169,6 +191,13 @@ pub fn separable(wx: &[f64], wy: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_efficiency_of_uniform_tapered_and_dark_arrays() {
+        assert_close(power_efficiency(&[1.0, 1.0, 1.0, 1.0]), 1.0, 1e-15);
+        assert_close(power_efficiency(&[2.0, 1.0]), 0.625, 1e-15);
+        assert_eq!(power_efficiency(&[0.0, 0.0]), 0.0);
+    }
     use crate::error::AntennaError;
     use crate::math::assert_close;
 

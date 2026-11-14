@@ -312,8 +312,10 @@ src/
   array/
     mod.rs         PhasedArray<E>, MultiBeamArray, SteeringMode, evaluation kernel
     lattice.rs     lattice generators and aperture masks
-    taper.rs       uniform, cosine-on-pedestal, Taylor, Chebyshev, separable
+    taper.rs       uniform, cosine-on-pedestal, Taylor, Chebyshev, separable, power efficiency
     grating.rs     grating-lobe prediction
+    excitation.rs  hardware limits: phase-only, attenuator range / bits, phase quantisation
+    synthesis.rs   pattern synthesis (alternating projections), closed-form nulls
   frames.rs        SatelliteFrame / LocalFrame integration
   batch.rs         par::* (feature `parallel`)
 benches/           criterion benches per family
@@ -328,6 +330,8 @@ ADRs (in `docs/adr/`):
 3. Antenna-frame and direction conventions (aligned with `ScanAngles` and TICRA).
 4. Array gain normalisation (`|AF|²/Σ|w|²` × embedded element gain).
 5. GRD interpolation in dB and out-of-grid policy.
+6. ITU-R patterns from the latest editions.
+7. Array pattern synthesis by alternating projections.
 
 ---
 
@@ -385,7 +389,8 @@ ADRs (in `docs/adr/`):
   S.1855, BO.1443), from verified text only; re-check editions on itu.int.
 - `serde` support for model configurations (feature).
 - Sub-arrays, overlapped sub-arrays, digital beamforming weight solvers
-  (MVDR, null steering).
+  (MVDR). Done: per-element excitation, hardware limits, mask synthesis by
+  alternating projections, closed-form null steering (ADR 0007).
 - Frequency-dependent analytic patterns (gain vs. frequency over a band).
 
 ---

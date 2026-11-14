@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Array excitation: `PhasedArray::with_excitation` (per-element amplitude and phase offset added
+  to the steering phase), accessors (`excitation`, `positions`, `failed`, `phase_bits`,
+  `steering_phases_rad`, `radiated_amplitudes`), `power_efficiency` (per-element amplifiers).
+- `array::excitation`: `ExcitationLimits` (phase-only, attenuator range and resolution),
+  `quantise_phase`.
+- `array::synthesis`: `synthesize` (lower / upper gain bounds at sampled directions, coverage level
+  fixed or maximised, hardware limits, warm start) and `place_nulls` (closed-form nulls).
+- `analysis::find_peak` and `analysis::refine_peak` (true pattern maximum).
+- `math::Complex`: `ZERO`, `conj`, `scale`, `abs`, subtraction.
+
+### Changed
+- `PhasedArray::with_phase_bits` quantises the total phase (steering + excitation offset); with
+  zero offsets the result is unchanged.
+
 - `GainPattern` trait, `AnyPattern`, `Direction` with TICRA and `ScanAngles` conventions.
 - Parabolic models: uniform and tapered circular apertures, circular and elliptical Gaussian beams.
 - ITU-R S.465-6 (with Notes 4 and 5), S.580-6 and S.672-4 (recommends 1) patterns.
