@@ -89,5 +89,22 @@ fn arrays(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, parabolic, grid, steered, arrays);
+/// 400-element natural beam: the exact sum against the shift-invariant kernel.
+fn kernel(c: &mut Criterion) {
+    let d = rf_r::fspl::wavelength_m(FREQ_HZ) / 2.0;
+    let pos = rectangular(20, 20, d, d).unwrap();
+    let mut a = PhasedArray::new(CosineQ::new(1.2).unwrap(), &pos, FREQ_HZ).unwrap();
+    a.steer(Direction::from_uv(0.2, -0.1).unwrap(), SteeringMode::Phase);
+    let k = a.kernel(FREQ_HZ, 5e-5).unwrap();
+    let (u, v) = (0.25, -0.05);
+    let dir = Direction::from_uv(u, v).unwrap();
+    c.bench_function("array_400_exact_gain", |b| {
+        b.iter(|| black_box(&a).array_gain_db(black_box(dir), FREQ_HZ));
+    });
+    c.bench_function("array_400_kernel_gain", |b| {
+        b.iter(|| black_box(&k).array_gain_db(black_box(u), black_box(v), 0.2, -0.1));
+    });
+}
+
+criterion_group!(benches, parabolic, grid, steered, arrays, kernel);
 criterion_main!(benches);

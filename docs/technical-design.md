@@ -25,6 +25,7 @@ decisions in [docs/adr](adr/).
 | `array::lattice` | `linear`, `rectangular`, `triangular`, `concentric_rings`, `circular_mask`, `polygon_mask` | — |
 | `array::taper` | `uniform`, `cosine_on_pedestal`, `taylor`, `chebyshev`, `separable`, `taper_efficiency`, `power_efficiency` | `math` |
 | `array::grating` | `grating_lobes`, `has_grating_lobe` | — |
+| `array::kernel` | `ArrayKernel` (`PhasedArray::kernel`): shift-invariant array gain of a planar array, separable 1D tables or a 2D table, phasor-recurrence fill | `math`, `rayon` (feature `parallel`) |
 | `frames` | `direction_from_satellite`, `gain_from_satellite`, `gains_from_satellite`, `direction_from_station`, `gain_from_station` | `geometry_r` |
 | `analysis` | `cut`, `gain_map_theta_phi`, `gain_map_uv`, `beam_edge_rad`, `beamwidth_rad`, `cut_features`, `mean_gain_db(_piecewise)`, `directivity_dbi`, `find_peak`, `refine_peak` | `math` |
 | `math` | `Complex`, `bessel_jn`, `lambda_n`, `gauss_legendre`, `ellipse_radius`, `chebyshev_t` | — |

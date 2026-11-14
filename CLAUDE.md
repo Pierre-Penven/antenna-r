@@ -373,7 +373,8 @@ ADRs (in `docs/adr/`):
    editions, verified against the official texts).
 4. **M3 GRD**: done (ICOMP 1–4, IGRID 1/4/5/6/7, CSV and cuts, writer).
 5. **M4 Steerable**: done, with frames integration.
-6. **M5 Phased arrays**: done except circular Taylor and the separable fast path.
+6. **M5 Phased arrays**: done except circular Taylor; separable fast path done as
+   `array::kernel` (also a 2D table for any planar array, 2026-11-14).
 7. **M6 Performance**: criterion benches for every family and the `parallel`
    feature done; allocation audit of evaluation paths done (no allocation).
 
@@ -384,7 +385,7 @@ ADRs (in `docs/adr/`):
   mismatch loss — using the two field components kept since M3/M5.
 - Per-element orientation and per-element patterns (GRD per element) in arrays.
 - Bicubic / spline GRD interpolation; TICRA `.cut` files; GRD `ICOMP` 5–9.
-- Circular Taylor taper; separable fast path for rectangular arrays.
+- Circular Taylor taper.
 - More ITU-R patterns on demand (e.g. S.672-4 recommends 2 shaped beams, F.1336,
   S.1855, BO.1443), from verified text only; re-check editions on itu.int.
 - `serde` support for model configurations (feature).

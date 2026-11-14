@@ -10,7 +10,7 @@ C4Component
     Component(itu, "parabolic::itu", "ItuS465, ItuS580, ItuS1428, ItuF699, ItuF1245, ItuS672, ItuS1528*, ItuBo1213, ItuBo1295, Ap30*", "ITU-R and RR Appendix 30/30A reference patterns")
     Component(grd, "grd", "GridPattern, GrdFile, table", "Gridded patterns, TICRA reader/writer, CSV")
     Component(steer, "steer", "Steered, Mount, ScanLoss", "Mounted and electronically steered patterns")
-    Component(array, "array", "PhasedArray, MultiBeamArray, lattice, taper, grating, excitation, synthesis", "Phased arrays, hardware limits, pattern synthesis")
+    Component(array, "array", "PhasedArray, MultiBeamArray, lattice, taper, grating, excitation, synthesis, kernel", "Phased arrays, hardware limits, pattern synthesis")
     Component(frames, "frames", "functions", "Gain towards ECEF targets")
     Component(analysis, "analysis", "functions", "Cuts, beamwidths, side lobes, integration")
     Component(math, "math", "Complex, bessel_jn, gauss_legendre", "Numerical kernels")
