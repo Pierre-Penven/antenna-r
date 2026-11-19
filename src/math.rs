@@ -304,6 +304,72 @@ pub fn chebyshev_t(n: u32, x: f64) -> f64 {
     }
 }
 
+/// Largest `|x|` (rad) for which [`branch_free_sin_cos`] keeps its accuracy:
+/// its reduction by π/2 is exact while `round(2x/π) < 2^20`.
+pub(crate) const BRANCH_FREE_SIN_COS_LIMIT: f64 = 1.0e6;
+
+/// `1.5 · 2^52`: adding it to `|y| < 2^51` rounds `y` to the nearest integer
+/// and leaves that integer in the low mantissa bits.
+const ROUND_MAGIC: f64 = 6_755_399_441_055_744.0;
+/// π/2 in three parts of 33, 33 and 53 bits (fdlibm `pio2_1`, `pio2_2`,
+/// `pio2_3`), so that `q · part` is exact for `q < 2^20`.
+const PIO2_PARTS: [f64; 3] = [
+    1.570_796_326_734_125_6,
+    6.077_100_506_303_966e-11,
+    2.022_266_248_795_950_6e-21,
+];
+/// fdlibm `__kernel_sin` coefficients `S1…S6` on [−π/4, π/4].
+const SIN_COEFFS: [f64; 6] = [
+    -1.666_666_666_666_663_2e-1,
+    8.333_333_333_322_49e-3,
+    -1.984_126_982_985_795e-4,
+    2.755_731_370_707_006_8e-6,
+    -2.505_076_025_340_686_3e-8,
+    1.589_690_995_211_55e-10,
+];
+/// fdlibm `__kernel_cos` coefficients `C1…C6` on [−π/4, π/4].
+const COS_COEFFS: [f64; 6] = [
+    4.166_666_666_666_66e-2,
+    -1.388_888_888_887_411e-3,
+    2.480_158_728_947_673e-5,
+    -2.755_731_435_139_066_3e-7,
+    2.087_572_321_298_175e-9,
+    -1.135_964_755_778_819_5e-11,
+];
+
+/// `(sin x, cos x)` without branches or calls, so that a loop over array
+/// elements vectorises.
+///
+/// `x = q·π/2 + r` with `q = round(2x/π)` and the three-part Cody–Waite
+/// reduction of fdlibm's `__ieee754_rem_pio2` (exact products), then the
+/// fdlibm minimax polynomials `__kernel_sin` / `__kernel_cos` for `r` in
+/// [−π/4, π/4], and the quadrant `q mod 4` applied with bit masks. Within
+/// `1e-15` of `f64::sin_cos` for `|x| ≤` [`BRANCH_FREE_SIN_COS_LIMIT`]
+/// (tested); `NaN` for a non-finite `x`. Larger `|x|` lose accuracy: callers
+/// check the range and fall back to `f64::sin_cos`.
+#[inline]
+pub(crate) fn branch_free_sin_cos(x: f64) -> (f64, f64) {
+    let t = x * std::f64::consts::FRAC_2_PI + ROUND_MAGIC;
+    let quadrant = t.to_bits();
+    let q = t - ROUND_MAGIC;
+    let r = ((x - q * PIO2_PARTS[0]) - q * PIO2_PARTS[1]) - q * PIO2_PARTS[2];
+    let z = r * r;
+    let [s1, s2, s3, s4, s5, s6] = SIN_COEFFS;
+    let [c1, c2, c3, c4, c5, c6] = COS_COEFFS;
+    let sin_r = r + r * z * (s1 + z * (s2 + z * (s3 + z * (s4 + z * (s5 + z * s6)))));
+    let cos_r = 1.0 - 0.5 * z + z * z * (c1 + z * (c2 + z * (c3 + z * (c4 + z * (c5 + z * c6)))));
+    // Odd quadrants swap sine and cosine; quadrants 2, 3 negate the sine
+    // and 1, 2 the cosine.
+    let swap = (quadrant & 1).wrapping_neg();
+    let (sin_bits, cos_bits) = (sin_r.to_bits(), cos_r.to_bits());
+    let sin = (sin_bits & !swap) | (cos_bits & swap);
+    let cos = (cos_bits & !swap) | (sin_bits & swap);
+    (
+        f64::from_bits(sin ^ ((quadrant & 2) << 62)),
+        f64::from_bits(cos ^ ((quadrant.wrapping_add(1) & 2) << 62)),
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn assert_close(actual: f64, expected: f64, tol: f64) {
     assert!(
@@ -455,5 +521,44 @@ mod tests {
         assert_close(chebyshev_t(3, 2.0), 4.0 * 8.0 - 6.0, 1e-12);
         assert_close(chebyshev_t(3, -2.0), -26.0, 1e-12);
         assert_close(chebyshev_t(2, -2.0), 7.0, 1e-12);
+    }
+
+    /// `|ours − f64::sin_cos|` for both components.
+    fn sin_cos_error(x: f64) -> f64 {
+        let ((s, c), (rs, rc)) = (branch_free_sin_cos(x), x.sin_cos());
+        (s - rs).abs().max((c - rc).abs())
+    }
+
+    #[test]
+    fn branch_free_sin_cos_matches_the_library_across_its_range() {
+        // Every quadrant boundary and its neighbours, up to ±20 turns.
+        for q in -80_i32..=80 {
+            let edge = f64::from(q) * FRAC_PI_4;
+            for x in [edge, edge.next_up(), edge.next_down(), edge + 1e-9, edge - 1e-9] {
+                assert!(sin_cos_error(x) <= 1e-15, "x = {x}: {}", sin_cos_error(x));
+            }
+        }
+        // A deterministic pseudo-random sweep of magnitudes from 1e-9 to the limit.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..200_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let unit = (state >> 11) as f64 / (1_u64 << 53) as f64;
+            let magnitude = 10_f64.powf(-9.0 + 15.0 * unit).min(BRANCH_FREE_SIN_COS_LIMIT);
+            let x = if state & 1 == 0 { magnitude } else { -magnitude };
+            assert!(sin_cos_error(x) <= 1e-15, "x = {x}: {}", sin_cos_error(x));
+        }
+    }
+
+    #[test]
+    fn branch_free_sin_cos_is_exact_at_zero_and_nan_for_non_finite_input() {
+        // The sign of a zero sine is not kept (it cannot change a sum).
+        assert_eq!(branch_free_sin_cos(0.0), (0.0, 1.0));
+        assert_eq!(branch_free_sin_cos(-0.0), (0.0, 1.0));
+        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let (s, c) = branch_free_sin_cos(x);
+            assert!(s.is_nan() && c.is_nan(), "{x}");
+        }
     }
 }

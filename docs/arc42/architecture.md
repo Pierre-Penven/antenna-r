@@ -100,6 +100,7 @@ None: the crate is compiled into the caller's binary. CI runs on GitHub Actions
 - [ADR 0004](../adr/0004-array-gain-normalisation.md): phased-array gain normalisation.
 - [ADR 0005](../adr/0005-grd-interpolation-and-out-of-grid-policy.md): GRD interpolation and out-of-grid policy.
 - [ADR 0006](../adr/0006-itu-r-patterns-from-latest-editions.md): ITU-R patterns from the latest editions.
+- [ADR 0008](../adr/0008-branch-free-sine-and-cosine-in-the-array-factor.md): branch-free sine and cosine in the array factor.
 
 ## 10. Quality requirements
 
@@ -110,6 +111,7 @@ None: the crate is compiled into the caller's binary. CI runs on GitHub Actions
 | GRD interpolation | exact at grid nodes |
 | Uniform aperture | first null 1.2197 λ/D, side lobe −17.57 dB, HPBW 1.029 λ/D |
 | Array | λ/2 isotropic ULA directivity = N; Chebyshev side lobes equal to the design |
+| Array factor speed | about 3 ns per element and direction (`phased_array_1024_elements_1k_dirs`: 3.2 ms); branch-free sine and cosine within 1e-15 of `f64::sin_cos` |
 | Robustness | malformed GRD/CSV input returns `AntennaError`, never panics |
 
 ## 11. Risks and technical debt
