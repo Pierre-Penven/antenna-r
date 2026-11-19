@@ -31,7 +31,7 @@ use geometry_r::math::Vec3;
 
 use crate::direction::Direction;
 use crate::error::{AntennaError, Result, invalid, require_level_db, require_positive};
-use crate::math::Complex;
+use crate::math::{BRANCH_FREE_SIN_COS_LIMIT, Complex, branch_free_sin_cos};
 use crate::pattern::{DEFAULT_FLOOR_DBI, GainPattern};
 
 /// How the steering phases depend on frequency.
@@ -75,6 +75,86 @@ pub struct PhasedArray<E> {
 }
 
 /// Wavenumber `2π f / c` (rad/m).
+/// Independent partial sums of an array factor (vector lanes).
+const AF_LANES: usize = 4;
+
+/// The terms `a_n exp(jφ_n)` of an array factor, `φ_n = k r_n·û + ψ_n − s r_n·û₀`
+/// (`s = k` for true time delay, `0` for phase steering, whose `ψ_n` hold the
+/// steering); every slice has one value per element.
+struct Terms<'a> {
+    x: &'a [f64],
+    y: &'a [f64],
+    z: &'a [f64],
+    amplitude: &'a [f64],
+    offset: &'a [f64],
+    projection: &'a [f64],
+    k: f64,
+    ttd: f64,
+    dir: (f64, f64, f64),
+}
+
+impl Terms<'_> {
+    /// Phase of an element at `(x, y, z)` with phase offset `offset` and
+    /// steering projection `projection`.
+    #[inline]
+    fn phase_of(&self, (x, y, z): (f64, f64, f64), offset: f64, projection: f64) -> f64 {
+        let (u, v, w) = self.dir;
+        self.k * (x * u + y * v + z * w) + (offset - self.ttd * projection)
+    }
+
+    /// Phase `φ_i` of element `i`.
+    #[inline]
+    fn phase(&self, i: usize) -> f64 {
+        self.phase_of((self.x[i], self.y[i], self.z[i]), self.offset[i], self.projection[i])
+    }
+
+    /// The sum in [`AF_LANES`] partial sums with [`branch_free_sin_cos`]
+    /// (vectorised: the elements go by fixed-size chunks); `None` if a phase
+    /// is out of its range.
+    fn lane_sum(&self) -> Option<Complex> {
+        fn lanes(values: &[f64]) -> std::slice::Iter<'_, [f64; AF_LANES]> {
+            values.as_chunks::<AF_LANES>().0.iter()
+        }
+        let (mut re, mut im) = ([0.0; AF_LANES], [0.0; AF_LANES]);
+        let mut out_of_range = false;
+        let mut add = |lane: usize, phase: f64, amplitude: f64| {
+            out_of_range |= phase.abs() > BRANCH_FREE_SIN_COS_LIMIT;
+            let (s, c) = branch_free_sin_cos(phase);
+            re[lane] += amplitude * c;
+            im[lane] += amplitude * s;
+        };
+        let chunks = lanes(self.x)
+            .zip(lanes(self.y))
+            .zip(lanes(self.z))
+            .zip(lanes(self.offset))
+            .zip(lanes(self.projection))
+            .zip(lanes(self.amplitude));
+        for (((((x, y), z), offset), projection), amplitude) in chunks {
+            for lane in 0..AF_LANES {
+                add(
+                    lane,
+                    self.phase_of((x[lane], y[lane], z[lane]), offset[lane], projection[lane]),
+                    amplitude[lane],
+                );
+            }
+        }
+        let n = self.amplitude.len();
+        for i in n - n % AF_LANES..n {
+            add(0, self.phase(i), self.amplitude[i]);
+        }
+        let total = |p: [f64; AF_LANES]| (p[0] + p[1]) + (p[2] + p[3]);
+        (!out_of_range).then(|| Complex::new(total(re), total(im)))
+    }
+
+    /// The sum in order with `f64::sin_cos`, for any phase.
+    fn reference_sum(&self) -> Complex {
+        (0..self.amplitude.len()).fold(Complex::ZERO, |sum, i| {
+            let (s, c) = self.phase(i).sin_cos();
+            Complex::new(sum.re + self.amplitude[i] * c, sum.im + self.amplitude[i] * s)
+        })
+    }
+}
+
 pub(crate) fn wavenumber(freq_hz: f64) -> f64 {
     TAU * freq_hz / rf_r::constants::SPEED_OF_LIGHT
 }
@@ -333,26 +413,37 @@ impl<E: GainPattern> PhasedArray<E> {
     }
 
     /// Array factor `AF(û, f)` (complex, not normalised).
+    ///
+    /// The sum over the elements runs in four independent partial sums with a
+    /// branch-free sine and cosine, so that it vectorises (each term within
+    /// `1e-15` of `f64::sin_cos`); if an element phase exceeds `10⁶` rad
+    /// (elements kilometres apart) the sum is redone with `f64::sin_cos`.
     #[must_use]
     pub fn array_factor(&self, dir: Direction, freq_hz: f64) -> Complex {
+        let terms = self.terms(dir, freq_hz);
+        terms.lane_sum().unwrap_or_else(|| terms.reference_sum())
+    }
+
+    /// The per-element terms of `AF(dir, freq_hz)`.
+    fn terms(&self, dir: Direction, freq_hz: f64) -> Terms<'_> {
         let k = wavenumber(freq_hz);
-        let ttd = if self.mode == SteeringMode::TrueTimeDelay {
-            k
-        } else {
-            0.0
-        };
-        let (u, v, w) = (dir.u(), dir.v(), dir.w());
+        let n = self.amplitude.len();
         let g = &*self.geometry;
-        let mut re = 0.0;
-        let mut im = 0.0;
-        for n in 0..self.amplitude.len() {
-            let path = g.x[n].mul_add(u, g.y[n].mul_add(v, g.z[n] * w));
-            let phase = k.mul_add(path, ttd.mul_add(-self.projection[n], self.phase[n]));
-            let (s, c) = phase.sin_cos();
-            re += self.amplitude[n] * c;
-            im += self.amplitude[n] * s;
+        Terms {
+            x: &g.x[..n],
+            y: &g.y[..n],
+            z: &g.z[..n],
+            amplitude: &self.amplitude,
+            offset: &self.phase[..n],
+            projection: &self.projection[..n],
+            k,
+            ttd: if self.mode == SteeringMode::TrueTimeDelay {
+                k
+            } else {
+                0.0
+            },
+            dir: (dir.u(), dir.v(), dir.w()),
         }
-        Complex::new(re, im)
     }
 
     /// Array gain `10 log10(|AF|² / Σ a²)` in dB (element pattern excluded).
@@ -654,6 +745,56 @@ mod tests {
         assert!(ula(2).with_errors(&[0.0, 0.0], &[0.0]).is_err());
         assert!(ula(2).with_errors(&[0.0, f64::NAN], &[0.0, 0.0]).is_err());
         assert_eq!(ula(2).design_freq_hz(), F);
+    }
+
+    /// `n` elements on a 0.6 λ triangular lattice with uneven amplitudes and
+    /// phases, steered off axis.
+    fn uneven(n: usize, mode: SteeringMode) -> PhasedArray<Isotropic> {
+        let d = 0.6 * rf_r::fspl::wavelength_m(F);
+        let pos: Vec<Vec3> = (0..n)
+            .map(|i| {
+                let (row, col) = ((i / 23) as f64, (i % 23) as f64);
+                Vec3::new(d * (col + 0.5 * (row % 2.0)), d * 0.866 * row, 0.001 * (i % 3) as f64)
+            })
+            .collect();
+        let amplitudes: Vec<f64> = (0..n).map(|i| 0.5 + 0.5 * ((i * 7) % 11) as f64 / 10.0).collect();
+        let phases: Vec<f64> = (0..n).map(|i| ((i * 13) % 17) as f64 * 0.37 - 3.0).collect();
+        let mut a = PhasedArray::new(iso(), &pos, F)
+            .unwrap()
+            .with_excitation(&amplitudes, &phases)
+            .unwrap();
+        a.steer(Direction::from_uv(0.2, -0.1).unwrap(), mode);
+        a
+    }
+
+    #[test]
+    fn the_lane_sum_matches_the_reference_sum_for_every_remainder() {
+        for mode in [SteeringMode::Phase, SteeringMode::TrueTimeDelay] {
+            for n in [1, 2, 3, 4, 5, 7, 8, 446] {
+                let a = uneven(n, mode);
+                for (u, v) in [(0.0, 0.0), (0.2, -0.1), (0.35, 0.4), (-0.6, 0.1)] {
+                    let terms = a.terms(Direction::from_uv(u, v).unwrap(), 1.07 * F);
+                    let (fast, exact) = (terms.lane_sum().unwrap(), terms.reference_sum());
+                    let scale = a.amplitude.iter().sum::<f64>();
+                    assert!(
+                        (fast - exact).norm_sqr().sqrt() <= 1e-13 * scale,
+                        "n = {n}, {mode:?}, ({u}, {v})"
+                    );
+                    assert_eq!(a.array_factor(Direction::from_uv(u, v).unwrap(), 1.07 * F), fast);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phases_beyond_the_fast_range_use_the_library_sine_and_cosine() {
+        // Two elements 20 km apart: phases of about 4e6 rad at 10 GHz.
+        let a = PhasedArray::new(iso(), &[Vec3::new(0.0, 0.0, 0.0), Vec3::new(2e4, 0.0, 0.0)], F).unwrap();
+        let dir = Direction::from_theta_phi(0.3, 0.0);
+        let terms = a.terms(dir, F);
+        assert!(terms.phase(1).abs() > BRANCH_FREE_SIN_COS_LIMIT);
+        assert_eq!(terms.lane_sum(), None);
+        assert_eq!(a.array_factor(dir, F), terms.reference_sum());
     }
 
     #[test]

@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `PhasedArray::array_factor` (and every exact array gain) sums in four partial sums over
+  fixed-size chunks with a branch-free sine and cosine (`math::branch_free_sin_cos`, fdlibm
+  reduction and polynomials, within 1e-15 of `f64::sin_cos` up to 10⁶ rad), so the loop vectorises:
+  `phased_array_1024_elements_1k_dirs` 12.7 → 3.2 ms, `array_400_exact_gain` 4.14 → 1.26 µs.
+  Phases beyond 10⁶ rad fall back to `f64::sin_cos`. Results change by rounding only (ADR 0008).
+
 ### Added
 - `array::kernel`: `PhasedArray::kernel` and `ArrayKernel` — the shift-invariant gain of a planar
   array without phase quantisation (natural or shaped beams, phase or true-time-delay steering,

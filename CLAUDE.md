@@ -267,7 +267,7 @@ ANT-CORE-06 as an option.
 | ANT-PAA-06 | Impairments: element failures (mask), random amplitude/phase errors from a seeded RNG supplied by the caller (no global RNG, no new dependency: accept pre-generated error vectors). |
 | ANT-PAA-07 | Analysis helpers: grating-lobe check for a lattice/spacing/scan range (visible-space test of `û₀ + λ·lattice reciprocal`), scan loss vs. angle, broadside directivity estimate `4πA/λ²`. |
 | ANT-PAA-08 | Multiple simultaneous beams: `MultiBeamArray` sharing positions, one weight set per beam; evaluate one beam or all beams per direction. |
-| ANT-PAA-09 | Performance: precompute `k·r_n` once per frequency; inner loop is a branch-free `sin_cos` accumulation over contiguous `x, y, z, w_re, w_im` arrays (SoA layout); batch over directions; `parallel` feature parallelises over directions. Benched in `benches/antenna_bench.rs` (1024 elements). The separable fast path (`AF = AF_x · AF_y`) moved to the roadmap. |
+| ANT-PAA-09 | Performance: precompute `k·r_n` once per frequency; inner loop is a branch-free `sin_cos` accumulation over contiguous `x, y, z, w_re, w_im` arrays (SoA layout); batch over directions; `parallel` feature parallelises over directions. Benched in `benches/antenna_bench.rs` (1024 elements). Done: branch-free `math::branch_free_sin_cos` in four lanes, about 3 ns per element (ADR 0008, 2026-11-19). The separable fast path (`AF = AF_x · AF_y`) moved to the roadmap. |
 
 ### 4.6 Integration with geometry — `frames`
 | ID | Requirement |

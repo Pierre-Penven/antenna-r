@@ -43,7 +43,9 @@ No persistence. Key in-memory structures:
   components per point.
 - `PhasedArray<E>`: element pattern, positions as structure of arrays behind an `Arc` (shared by
   `MultiBeamArray` beams), taper, failure mask, amplitude/phase errors, steering, and derived
-  amplitudes, projections `r_n·û0` and phases.
+  amplitudes, projections `r_n·û0` and phases. `array_factor` sums the element terms in four
+  partial sums over `as_chunks::<4>()` with `math::branch_free_sin_cos`, so the loop vectorises;
+  a phase beyond 10⁶ rad redoes the sum in order with `f64::sin_cos` (ADR 0008).
 - `Steered<P>`: pattern, mount, limits, axes, roll, bias and the combined rotation matrix.
 
 ## 4. Interfaces
